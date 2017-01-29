@@ -6,6 +6,26 @@
 #include <iostream>
 #include <unistd.h>
 
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/types.h> 
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+void error(const char *msg)
+{
+    perror(msg);
+    exit(1);
+}
+
+bool quit = false;
+void sig_handler(int signum)
+{
+    quit = true;
+}
+
 class Motor;
 void ThreadHelper(Motor*);
 
@@ -22,7 +42,7 @@ int p2;
 int speed = 0;
 long lasttime = 0;
 long time = 0;
-int counter;
+int counter = 0;
 
 public:
 Encoder(int p1, int p2)
@@ -112,6 +132,7 @@ void Thread()
 			}
 		}
 		time++;
+//		Read();
 		if(time >= lasttime + 1500)
 		{
 			speed = 0;
@@ -129,6 +150,13 @@ int Counter()
 {
 	return counter;
 }
+
+int Read()
+{
+	
+	printf("%d/5 %d/6 %d/10 %d/11\n", digitalRead(5),
+	digitalRead(6), digitalRead(10), digitalRead(11));	
+}
       	
 }; //Encoder
 
@@ -141,10 +169,13 @@ void ThreadHelperE(Encoder* e)
 
 class Motor
 {
+bool loop = false;
+int lastcounter = 0;
+int degrees = 0;
 int p1;
 int p2;
 int power = 1;
-int speed;
+int speed = 0;
 
 std::thread* mthread;
 volatile bool stop_thread = false;
@@ -158,10 +189,10 @@ Motor(int a, int b, int p1, int p2) : e(p1, p2)
 {
 	this->p1 = a;
 	this->p2 = b;
-	digitalWrite (p1, LOW);
-	digitalWrite (p2, LOW);
-	pinMode (p1, OUTPUT) ;
-	pinMode (p2, OUTPUT) ;
+	digitalWrite (a, LOW);
+	digitalWrite (b, LOW);
+	pinMode (a, OUTPUT);
+	pinMode (b, OUTPUT);
 	stop_thread = false;
 	mthread = new std::thread(&ThreadHelper,this);
 }
@@ -176,18 +207,12 @@ void Run(int speed)
 {
 	this->speed = speed;
 }
-void RunDegrees(int speed, int degrees)
+void RunDegrees(int s, int d)
 {
-	
-	int lastcounter = e.Counter();
-	Run(speed);
-	while(lastcounter - e.Counter() < degrees*2)
-	{
-		usleep(1000);
-		printf("%d %d %d\n", e.Counter(), lastcounter, degrees);
-	}
-	printf("stopped\n");
-	Stop();	
+	loop = true;
+	lastcounter = e.Counter();
+	speed = s;
+	degrees = d;
 		
 	
 }
@@ -195,6 +220,11 @@ void RunDegrees(int speed, int degrees)
 void Stop()
 {
 	speed = 0;
+}
+
+bool Stopped()
+{
+	return !loop;
 }
 
  
@@ -210,8 +240,18 @@ void ThreadMain()
 			continue;
 			
 		}
+		//printf("%d  %d  T=%d\n", lastcounter, e.Counter(), lastcounter - e.Counter());
+		if ( (((lastcounter - e.Counter() > degrees*2) && (speed > 0)) ||
+		      ((lastcounter - e.Counter() < -degrees*2) && (speed < 0)))
+			&& loop)
+		{
+			speed = 0;
+			printf("Stop\n");
+			loop = false;
+		}
 		
 		power = (e.Speed() - speed) * -0.6;
+		//printf("P%d, E%d S%d\n", power, e.Speed(), speed);
 		if (power >= 100)
 		{
 			power = 100;
@@ -258,13 +298,87 @@ void ThreadHelper(Motor* m)
 
 
 
-int main (void)
+int main(int argc, char *argv[])
 {
   wiringPiSetup () ;
   Motor m1(3, 4, 5, 6);
-  m1.RunDegrees(100, 360);
+  Motor m2(2, 1, 10, 11);
   
+  
+	 signal(SIGINT, sig_handler);
+	 int sockfd, newsockfd, portno;
+	 socklen_t clilen;
+	 char buffer[256];
+	 struct sockaddr_in serv_addr, cli_addr;
+	 int n;
+	 if (argc < 2) {
+		 fprintf(stderr,"ERROR, no port provided\n");
+		 exit(1);
+	 }
+	 sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	 if (sockfd < 0) 
+		error("ERROR opening socket");
+	 bzero((char *) &serv_addr, sizeof(serv_addr));
+	 portno = atoi(argv[1]);
+	 serv_addr.sin_family = AF_INET;
+	 serv_addr.sin_addr.s_addr = INADDR_ANY;
+	 serv_addr.sin_port = htons(portno);
+	 if (bind(sockfd, (struct sockaddr *) &serv_addr,
+			  sizeof(serv_addr)) < 0) 
+			  error("ERROR on binding");
+	 listen(sockfd,5);
+	 clilen = sizeof(cli_addr);
+	 newsockfd = accept(sockfd, 
+				 (struct sockaddr *) &cli_addr, 
+				 &clilen);
+	 if (newsockfd < 0) 
+		  error("ERROR on accept");
+	 while(!quit)
+	 {
+		 bzero(buffer,256);
+		 n = read(newsockfd,buffer,255);
+		 if (n < 0) error("ERROR reading from socket");
+		 printf("%s",buffer);
 
 
-  return 0 ;
+
+		std::string command = std::string(buffer, strlen(buffer));
+		
+		if(command.find("m1") != std::string::npos)
+		{
+			std::string speed = command.substr (3);
+			int speed1 = std::stoi(speed);
+			printf("Motor 1 %d\n", speed1);
+			m1.Run(speed1);
+		}
+		
+		if(command.find("m2") != std::string::npos)
+		{
+			std::string speed = command.substr (3);
+			int speed1 = std::stoi(speed);
+			printf("Motor 2 %d\n", speed1);
+			m2.Run(speed1);
+		}
+		
+		if(command.find("mA") != std::string::npos)
+		{
+			std::string speed = command.substr (3);
+			int speed1 = std::stoi(speed);
+			printf("Motor All %d\n", speed1);
+			m2.Run(speed1);
+			m1.Run(speed1);
+		}
+		
+		
+		
+		
+		 if (n < 0) 
+		 {
+			printf("ERROR writing to socket");
+			break;
+		}
+	 }
+	 close(newsockfd);
+	 close(sockfd);
+	 return 0;
 } 
